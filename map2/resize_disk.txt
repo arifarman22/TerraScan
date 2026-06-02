@@ -1,0 +1,2 @@
+select vdisk file="F:\DockerData\DockerDesktopWSL\disk\docker_data.vhdx"
+expand vdisk maximum=102400

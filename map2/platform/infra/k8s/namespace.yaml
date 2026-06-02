@@ -1,0 +1,25 @@
+# Namespace and resource quota for the platform.
+# Full workload manifests (Deployments, Services, Ingress, NetworkPolicies)
+# are added in the deployment phase; this establishes the isolation
+# boundary and a capacity ceiling up front.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: drone-sat-platform
+  labels:
+    app.kubernetes.io/part-of: drone-sat-platform
+    app.kubernetes.io/managed-by: platform-team
+    classification: confidential
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: platform-quota
+  namespace: drone-sat-platform
+spec:
+  hard:
+    requests.cpu: "16"
+    requests.memory: 32Gi
+    limits.cpu: "48"
+    limits.memory: 96Gi
+    persistentvolumeclaims: "20"

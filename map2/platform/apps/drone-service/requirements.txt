@@ -1,0 +1,14 @@
+# Drone Photogrammetry Service — Python dependencies
+fastapi[standard]==0.136.1
+celery==5.6.3
+aio-pika==9.6.2
+asyncpg==0.31.0
+redis==7.4.0
+httpx==0.28.1
+pydantic-settings==2.14.1
+minio==7.2.20
+# Native geo stack — used to reproject NodeODM's UTM outputs to Web Mercator
+# so the in-browser COG viewer can render them directly.
+rasterio==1.5.0
+numpy==2.4.6
+laspy==2.5.4

@@ -1,0 +1,63 @@
+
+name: drone-sat-platform
+
+services:
+  postgres:
+    restart: always
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          cpus: "1"
+          memory: 2G
+
+  redis:
+    restart: always
+    ports: []
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+
+  rabbitmq:
+    restart: always
+    ports:
+      - "127.0.0.1:15672:15672"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+
+  minio:
+    image: minio/minio:${MINIO_RELEASE:?MINIO_RELEASE pinned tag is required in production}
+    restart: always
+    ports: []
+    environment:
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ORIGIN:?explicit CORS origin is required in production}
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+
+  nodeodm:
+    restart: always
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 16G

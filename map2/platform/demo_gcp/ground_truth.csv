@@ -1,0 +1,9 @@
+# Ground Control Points - Ground Truth Coordinates
+# Format: id,easting(lon),northing(lat),elevation(m)
+# Survey area: Barisal, Bangladesh (~22.711°N, 90.384°E)
+# Measured with RTK GPS (simulated demo data)
+gcp1,90.38370,22.71155,12.35
+gcp2,90.38420,22.71180,12.42
+gcp3,90.38450,22.71140,12.28
+gcp4,90.38390,22.71195,12.51
+gcp5,90.38470,22.71170,12.38

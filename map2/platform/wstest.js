@@ -1,0 +1,12 @@
+const { io } = require('socket.io-client');
+const [token, jobId] = process.argv.slice(2);
+const socket = io('http://localhost:3001/jobs', { auth: { token }, transports: ['websocket'], reconnection: false });
+let progressCount = 0;
+const seen = [];
+const finish = (code, msg) => { try { socket.close(); } catch {} console.log(msg); process.exit(code); };
+socket.on('connect', () => { console.log('CONNECTED'); socket.emit('subscribe', { jobId }); });
+socket.on('subscribed', (d) => console.log('SUBSCRIBED ' + JSON.stringify(d)));
+socket.on('progress', (p) => { progressCount += 1; seen.push(`${p.status}@${p.percent}%`); console.log('PROGRESS ' + JSON.stringify(p)); if (p.status === 'FAILED' || p.status === 'COMPLETE') { finish(0, `DONE — received ${progressCount} progress event(s): ${seen.join(', ')}`); } });
+socket.on('connect_error', (e) => finish(1, 'CONNECT_ERROR ' + e.message));
+socket.on('disconnect', (r) => { if (progressCount > 0) finish(0, `DISCONNECTED — received ${progressCount} event(s)`); else finish(2, 'DISCONNECTED ' + r); });
+setTimeout(() => { if (progressCount > 0) finish(0, `TIMEOUT (but got ${progressCount} event(s))`); else finish(9, 'TIMEOUT — no events'); }, 30000);

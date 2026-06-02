@@ -1,0 +1,33 @@
+{
+  "name": "drone-sat-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Enterprise Drone & Satellite Image Processing Platform — multi-tenant SaaS monorepo (SRS v2.0)",
+  "license": "UNLICENSED",
+  "packageManager": "npm@11.6.2",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "clean": "turbo run clean",
+    "infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
+    "infra:restart": "docker compose --env-file .env -f infra/docker-compose.yml restart",
+    "infra:logs": "docker compose --env-file .env -f infra/docker-compose.yml logs -f",
+    "infra:ps": "docker compose --env-file .env -f infra/docker-compose.yml ps",
+    "infra:prod": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d"
+  },
+  "devDependencies": {
+    "turbo": "2.9.14"
+  }
+}

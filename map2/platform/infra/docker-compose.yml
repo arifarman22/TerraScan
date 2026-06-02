@@ -1,0 +1,394 @@
+# ============================================================
+# Enterprise Drone & Satellite Image Processing Platform
+# Infrastructure stack — local / development
+#
+# Run from the repository root (platform/):
+#   docker compose --env-file .env -f infra/docker-compose.yml up -d
+# or simply:
+#   npm run infra:up
+# ============================================================
+name: drone-sat-platform
+
+networks:
+  platform_net:
+    name: platform_net
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: platform_postgres_data
+  redis_data:
+    name: platform_redis_data
+  rabbitmq_data:
+    name: platform_rabbitmq_data
+  minio_data:
+    name: platform_minio_data
+  nodeodm_data:
+    name: platform_nodeodm_data
+  nodecm_data:
+    name: platform_nodecm_data
+
+services:
+  # ---------- PostgreSQL 17 + PostGIS 3.5 ----------
+  postgres:
+    image: postgis/postgis:17-3.5
+    container_name: platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-map_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-map_admin_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-map_core}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-map_admin} -d ${POSTGRES_DB:-map_core}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------- Redis 8 — cache / sessions / Celery broker / pub-sub ----------
+  redis:
+    image: redis:8
+    container_name: platform-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------- RabbitMQ 4.1 — durable event bus (+ management UI) ----------
+  rabbitmq:
+    image: rabbitmq:4.1.0-management
+    container_name: platform-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-map_mq}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-map_mq_pass}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ---------- MinIO — S3-compatible object storage ----------
+  minio:
+    image: minio/minio:latest
+    container_name: platform-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ORIGIN:-http://localhost:3000}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------- MinIO bucket bootstrap (one-shot) ----------
+  minio-init:
+    image: minio/mc:latest
+    container_name: platform-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo 'Waiting for MinIO to accept connections...'
+        until mc alias set local "http://minio:9000" "${MINIO_ACCESS_KEY:-minioadmin}" "${MINIO_SECRET_KEY:-minioadmin}" >/dev/null 2>&1; do
+          sleep 2
+        done
+        for bucket in platform-raw platform-processed platform-reports platform-exports; do
+          mc mb --ignore-existing "local/$$bucket"
+          mc anonymous set none "local/$$bucket"
+          echo "bucket ready: $$bucket"
+        done
+        echo 'MinIO bucket bootstrap complete.'
+    networks:
+      - platform_net
+    restart: "no"
+
+  # ---------- NodeODM — photogrammetry engine ----------
+  nodeodm:
+    image: opendronemap/nodeodm:latest
+    container_name: platform-nodeodm
+    restart: unless-stopped
+    command: ["--max_images", "20", "--parallel_queue_processing", "1"]
+    ports:
+      - "${NODEODM_PORT:-3000}:3000"
+    volumes:
+      - nodeodm_data:/var/www/data
+    networks:
+      - platform_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "require(''http'').get(''http://localhost:3000/info'',function(r){process.exit(r.statusCode===200?0:1)}).on(''error'',function(){process.exit(1)})"'
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 45s
+
+  # ---------- NodeCM — COLMAP-based photogrammetry engine (GCP support) ----------
+  nodecm:
+    image: uav4geo/nodecm:latest
+    container_name: platform-nodecm
+    restart: unless-stopped
+    ports:
+      - "${NODECM_PORT:-3002}:3000"
+    volumes:
+      - nodecm_data:/app/NodeODM/data
+    networks:
+      - platform_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "require(''http'').get(''http://localhost:3000/info'',function(r){process.exit(r.statusCode===200?0:1)}).on(''error'',function(){process.exit(1)})"'
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  # ---------- Core Management Service (NestJS) ----------
+  core-service:
+    build:
+      context: ..
+      dockerfile: apps/core-service/Dockerfile
+    image: platform/core-service:dev
+    container_name: platform-core-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      CORE_SERVICE_PORT: 3001
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_APP_URL: ${DATABASE_APP_URL}
+      REDIS_URL: ${REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-platform-raw}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-900}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-604800}
+      ARGON2_MEMORY_COST: ${ARGON2_MEMORY_COST:-19456}
+      ARGON2_TIME_COST: ${ARGON2_TIME_COST:-2}
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_LOCKOUT_SECONDS: ${LOGIN_LOCKOUT_SECONDS:-900}
+      MFA_ISSUER: ${MFA_ISSUER:-DroneSatPlatform}
+    ports:
+      - "${CORE_SERVICE_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - platform_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "require(''http'').get(''http://localhost:3001/health'',function(r){process.exit(r.statusCode===200?0:1)}).on(''error'',function(){process.exit(1)})"'
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ---------- Drone Photogrammetry Service (FastAPI) ----------
+  drone-service:
+    build:
+      context: ../apps/drone-service
+      dockerfile: Dockerfile
+    image: platform/drone-service:dev
+    container_name: platform-drone-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      REDIS_URL: ${REDIS_URL}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      NODEODM_URL: ${NODEODM_URL}
+      NODECM_URL: ${NODECM_URL:-http://nodecm:3000}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-platform-raw}
+      MINIO_BUCKET_PROCESSED: ${MINIO_BUCKET_PROCESSED:-platform-processed}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${DRONE_SERVICE_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      nodeodm:
+        condition: service_healthy
+    networks:
+      - platform_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'python -c "import urllib.request; urllib.request.urlopen(''http://localhost:8000/health/live'')"'
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ---------- Drone Celery worker ----------
+  drone-worker:
+    image: platform/drone-service:dev
+    container_name: platform-drone-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      REDIS_URL: ${REDIS_URL}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      NODEODM_URL: ${NODEODM_URL}
+      NODECM_URL: ${NODECM_URL:-http://nodecm:3000}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-platform-raw}
+      MINIO_BUCKET_PROCESSED: ${MINIO_BUCKET_PROCESSED:-platform-processed}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      drone-service:
+        condition: service_started
+    networks:
+      - platform_net
+
+  # ---------- Satellite & Analytics Service (FastAPI) ----------
+  satellite-service:
+    build:
+      context: ../apps/satellite-service
+      dockerfile: Dockerfile
+    image: platform/satellite-service:dev
+    container_name: platform-satellite-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      REDIS_URL: ${REDIS_URL}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-platform-raw}
+      MINIO_BUCKET_PROCESSED: ${MINIO_BUCKET_PROCESSED:-platform-processed}
+      SENTINELHUB_CLIENT_ID: ${SENTINELHUB_CLIENT_ID:-}
+      SENTINELHUB_CLIENT_SECRET: ${SENTINELHUB_CLIENT_SECRET:-}
+      PLANET_API_KEY: ${PLANET_API_KEY:-}
+      SATELLITE_SERVICE_PORT: 8010
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${SATELLITE_SERVICE_PORT:-8010}:8010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - platform_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'python -c "import urllib.request; urllib.request.urlopen(''http://localhost:8010/health/live'')"'
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ---------- Satellite Celery worker ----------
+  satellite-worker:
+    image: platform/satellite-service:dev
+    container_name: platform-satellite-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      REDIS_URL: ${REDIS_URL}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-platform-raw}
+      MINIO_BUCKET_PROCESSED: ${MINIO_BUCKET_PROCESSED:-platform-processed}
+      SENTINELHUB_CLIENT_ID: ${SENTINELHUB_CLIENT_ID:-}
+      SENTINELHUB_CLIENT_SECRET: ${SENTINELHUB_CLIENT_SECRET:-}
+      PLANET_API_KEY: ${PLANET_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      satellite-service:
+        condition: service_started
+    networks:
+      - platform_net
